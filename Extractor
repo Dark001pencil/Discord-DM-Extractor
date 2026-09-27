@@ -54,7 +54,9 @@
    HOW TO USE
    ========================================================================
 
-   1. Open the Discord DM.
+Edit configuration setting prior to usage to get desired results
+
+   1. Open the Discord DM (in a browser).
 
    2. Open Discord SEARCH.
 
@@ -129,8 +131,7 @@
         */
 
         authors: [
-            "Dark",
-            "Vanta"
+
         ],
 
 
