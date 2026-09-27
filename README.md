@@ -1,5 +1,5 @@
 # Discord-DM-Extractor
-**BEFORE USING I WOULD RECOMMEND READING THROUGH THE COMMENTS OF THE CODE TO UNDERSTAND THE INSTRUCTIONS (Especially if using for multiple DMS)**
+**BEFORE USING I WOULD RECOMMEND READING THROUGH THE COMMENTS OF THE CODE TO UNDERSTAND THE INSTRUCTIONS (Especially if using for multiple DMS)**\
 Tokenless Discord Text extractor\
 **IMPORTANT: This script is completely tokenless and can't collect deleted messages**\
 How to use:\
