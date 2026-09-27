@@ -1,0 +1,4550 @@
+/* ========================================================================
+   DISCORD DM SEARCH COLLECTOR v5.1
+   ========================================================================
+
+   DOM-ONLY / VISIBLE DISCORD SEARCH UI COLLECTOR
+
+   FEATURES
+   ------------------------------------------------------------------------
+   • Collects visible Discord Search Results
+   • Multiple configurable authors
+   • Reusable for different DMs
+   • IndexedDB persistence
+   • Duplicate-safe
+   • Adaptive page delay
+   • Automatic slowdown when Discord becomes slow
+   • Automatic safety pause when a page gets stuck
+   • Manual PAUSE / RESUME
+   • STOP & SAVE
+   • JSON export
+   • JSONL export
+   • Draggable GUI
+   • Remembers GUI position
+   • Current page tracking
+   • Pages remaining
+   • Rolling ETA
+   • Estimated finish time
+   • Last page-load time
+   • Current adaptive delay
+   • Background-tab visibility indicator
+
+   IMPORTANT
+   ------------------------------------------------------------------------
+   This script intentionally does NOT use:
+
+       • Discord API
+       • Discord auth tokens
+       • Bot tokens
+       • Self-bots
+       • WebSocket manipulation
+       • Direct Discord HTTP requests
+
+   It works from the visible Discord Search Results DOM.
+
+   Because of that, it CANNOT directly inspect an HTTP 429 response.
+
+   Instead, it treats these as likely throttling / failure signals:
+
+       • Search results disappear
+       • Next page never appears
+       • Page fails to change
+       • Discord takes unusually long to load the next page
+
+   ========================================================================
+   HOW TO USE
+   ========================================================================
+
+   1. Open the Discord DM.
+
+   2. Open Discord SEARCH.
+
+   3. Use a search that returns the messages you want.
+
+      IMPORTANT:
+      If you want BOTH sides of a DM, use (from:user1 from:user2) for the complete dm history
+
+   4. Get the search results showing.
+
+   5. Open DevTools:
+
+        F12
+
+      or:
+
+        Ctrl + Shift + I
+
+   6. Open Console.
+
+   7. Paste this entire script.
+
+   8. Press Enter.
+
+   9. The script starts with the currently visible search-results page.
+
+   ========================================================================
+   CONFIGURATION
+   ========================================================================
+
+   ONLY THE SECTION BELOW SHOULD NORMALLY NEED EDITING.
+
+   ======================================================================== */
+
+
+(() => {
+
+    "use strict";
+
+
+    /* ====================================================================
+       ========================== USER CONFIG =============================
+       ====================================================================
+
+       >>> EDIT THIS SECTION WHEN REUSING THE SCRIPT <<<
+
+       ==================================================================== */
+
+    const CONFIG = {
+
+        /* ---------------------------------------------------------------
+           AUTHORS
+           ---------------------------------------------------------------
+
+           Put the Discord DISPLAY NAMES you want to collect.
+
+           Current DM:
+
+               ["Dark", "Daddy"]
+
+           Different DM:
+
+               ["Alice", "Bob"]
+
+           If you use:
+
+               authors: []
+
+           then ALL visible authors are accepted.
+
+           Matching is case-insensitive.
+        */
+
+        authors: [
+            "Dark",
+            "Daddy"
+        ],
+
+
+        /* ---------------------------------------------------------------
+           DATABASE NAME
+           ---------------------------------------------------------------
+
+           KEEP THIS EXACT NAME to continue your existing collection:
+
+               discord_dm_search_collector_v2
+
+           For a DIFFERENT DM, use a different database name.
+
+           Example:
+
+               databaseName: "discord-dm-alice-bob"
+
+           IMPORTANT:
+
+           If you change authors but keep the same database name,
+           the old messages remain in that database.
+        */
+
+        databaseName:
+            "discord_dm_search_collector_v2",
+
+
+        /* ---------------------------------------------------------------
+           STARTING DELAY
+           ---------------------------------------------------------------
+
+           Initial wait before clicking Next.
+
+           6000 = 6 seconds.
+        */
+
+        startingDelayMs:
+            6000,
+
+
+        /* ---------------------------------------------------------------
+           MINIMUM DELAY
+           ---------------------------------------------------------------
+
+           Adaptive mode will not normally go below this.
+
+           5000 = 5 seconds.
+
+           Keeping this reasonably conservative is intentional.
+        */
+
+        minimumDelayMs:
+            5000,
+
+
+        /* ---------------------------------------------------------------
+           MAXIMUM DELAY
+           ---------------------------------------------------------------
+
+           If Discord becomes slow or starts failing, the collector can
+           increase its delay up to this value.
+
+           20000 = 20 seconds.
+        */
+
+        maximumDelayMs:
+            20000,
+
+
+        /* ---------------------------------------------------------------
+           ADAPTIVE STEP
+           ---------------------------------------------------------------
+
+           How much the delay changes when speeding up/slowing down.
+
+           1000 = 1 second.
+        */
+
+        delayStepMs:
+            1000,
+
+
+        /* ---------------------------------------------------------------
+           SPEED-UP STREAK
+           ---------------------------------------------------------------
+
+           After this many healthy pages, the collector can reduce its
+           delay by one step.
+
+           Example:
+
+               3 healthy pages
+               -> 6s becomes 5s
+
+           It will not go below minimumDelayMs.
+        */
+
+        successfulPagesBeforeSpeedup:
+            3,
+
+
+        /* ---------------------------------------------------------------
+           SLOW PAGE THRESHOLD
+           ---------------------------------------------------------------
+
+           If Discord takes longer than this to load a page, slow down.
+
+           12000 = 12 seconds.
+        */
+
+        slowPageLoadMs:
+            12000,
+
+
+        /* ---------------------------------------------------------------
+           PAGE LOAD TIMEOUT
+           ---------------------------------------------------------------
+
+           Maximum time to wait for Discord's next page.
+
+           30000 = 30 seconds.
+
+           If Discord hasn't changed the page by then, the collector
+           pauses rather than clicking Next again.
+        */
+
+        pageLoadTimeoutMs:
+            30000,
+
+
+        /* ---------------------------------------------------------------
+           SAFETY COOLDOWN
+           ---------------------------------------------------------------
+
+           First suspected throttling event:
+
+               90 seconds
+
+           Second:
+
+               180 seconds
+
+           Third:
+
+               up to 300 seconds
+
+           etc.
+        */
+
+        cooldownAfterFailureMs:
+            90000,
+
+
+        maximumCooldownMs:
+            300000,
+
+
+        /* ---------------------------------------------------------------
+           JITTER
+           ---------------------------------------------------------------
+
+           Adds a small random amount to each wait.
+
+           Example with:
+
+               delay = 6000
+               jitter = 1000
+
+           actual wait can be roughly:
+
+               5-7 seconds
+
+           Set to 0 to disable.
+        */
+
+        jitterMs:
+            1000,
+
+
+        /* ---------------------------------------------------------------
+           AUTOMATIC SAFETY PAUSING
+           --------------------------------------------------------------- */
+
+        pauseIfSearchDisappears:
+            true,
+
+
+        pauseAfterFailedPage:
+            true,
+
+
+        /* ---------------------------------------------------------------
+           ETA SETTINGS
+           ---------------------------------------------------------------
+
+           Number of recent page cycles used for ETA.
+
+           10 is a good balance.
+
+           The ETA becomes more stable as more pages are collected.
+        */
+
+        etaSampleCount:
+            10,
+
+
+        /* ---------------------------------------------------------------
+           GUI
+           --------------------------------------------------------------- */
+
+        rememberGuiPosition:
+            true
+    };
+
+
+    /* ====================================================================
+       ======================= INTERNAL STATE =============================
+       ==================================================================== */
+
+    const STATE = {
+
+        running:
+            false,
+
+        paused:
+            false,
+
+        stopped:
+            false,
+
+
+        currentDelay:
+            clamp(
+                CONFIG.startingDelayMs,
+                CONFIG.minimumDelayMs,
+                CONFIG.maximumDelayMs
+            ),
+
+
+        currentPage:
+            null,
+
+
+        totalPages:
+            null,
+
+
+        totalResults:
+            null,
+
+
+        savedCount:
+            0,
+
+
+        pagesCollectedThisRun:
+            0,
+
+
+        currentPageLoadMs:
+            null,
+
+
+        currentStatus:
+            "Starting...",
+
+
+        lastError:
+            null,
+
+
+        throttleStrikes:
+            0,
+
+
+        successfulPages:
+            0,
+
+
+        /*
+           Recent complete page-cycle durations.
+
+           Each sample represents roughly:
+
+               delay + Discord page load
+
+           This is what makes the ETA adaptive.
+        */
+
+        cycleSamples:
+            [],
+
+
+        lastCycleStartedAt:
+            null,
+
+
+        lastPageSignature:
+            null,
+
+
+        sessionStartedAt:
+            Date.now(),
+
+
+        pageStartedAt:
+            null
+    };
+
+
+    /* ====================================================================
+       ========================== HELPERS =================================
+       ==================================================================== */
+
+
+    function clamp(
+        value,
+        min,
+        max
+    ) {
+
+        return Math.max(
+            min,
+            Math.min(
+                max,
+                value
+            )
+        );
+    }
+
+
+    function sleep(
+        ms
+    ) {
+
+        return new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    ms
+                )
+        );
+    }
+
+
+    function formatNumber(
+        value
+    ) {
+
+        if (
+            value === null ||
+            value === undefined ||
+            Number.isNaN(value)
+        ) {
+
+            return "—";
+        }
+
+        return Number(value)
+            .toLocaleString();
+    }
+
+
+    function formatDuration(
+        milliseconds
+    ) {
+
+        if (
+            milliseconds === null ||
+            milliseconds === undefined ||
+            !Number.isFinite(milliseconds)
+        ) {
+
+            return "—";
+        }
+
+
+        const totalSeconds =
+            Math.max(
+                0,
+                Math.round(
+                    milliseconds / 1000
+                )
+            );
+
+
+        const hours =
+            Math.floor(
+                totalSeconds / 3600
+            );
+
+
+        const minutes =
+            Math.floor(
+                (totalSeconds % 3600) / 60
+            );
+
+
+        const seconds =
+            totalSeconds % 60;
+
+
+        if (hours > 0) {
+
+            return (
+                `${hours}h ` +
+                `${minutes}m ` +
+                `${seconds}s`
+            );
+        }
+
+
+        if (minutes > 0) {
+
+            return (
+                `${minutes}m ` +
+                `${seconds}s`
+            );
+        }
+
+
+        return `${seconds}s`;
+    }
+
+
+    function formatShortDuration(
+        milliseconds
+    ) {
+
+        if (
+            milliseconds === null ||
+            milliseconds === undefined ||
+            !Number.isFinite(milliseconds)
+        ) {
+
+            return "—";
+        }
+
+
+        const seconds =
+            Math.max(
+                0,
+                Math.round(
+                    milliseconds / 1000
+                )
+            );
+
+
+        if (seconds < 60) {
+
+            return `${seconds}s`;
+        }
+
+
+        const minutes =
+            Math.floor(
+                seconds / 60
+            );
+
+
+        const remainingSeconds =
+            seconds % 60;
+
+
+        if (minutes < 60) {
+
+            return (
+                `${minutes}m ` +
+                `${remainingSeconds}s`
+            );
+        }
+
+
+        const hours =
+            Math.floor(
+                minutes / 60
+            );
+
+
+        const remainingMinutes =
+            minutes % 60;
+
+
+        return (
+            `${hours}h ` +
+            `${remainingMinutes}m`
+        );
+    }
+
+
+    function formatEtaClock(
+        millisecondsFromNow
+    ) {
+
+        if (
+            millisecondsFromNow === null ||
+            !Number.isFinite(
+                millisecondsFromNow
+            )
+        ) {
+
+            return "—";
+        }
+
+
+        const date =
+            new Date(
+                Date.now() +
+                millisecondsFromNow
+            );
+
+
+        return date.toLocaleTimeString(
+            [],
+            {
+                hour: "numeric",
+                minute: "2-digit"
+            }
+        );
+    }
+
+
+    function randomJitter() {
+
+        if (
+            !CONFIG.jitterMs
+        ) {
+
+            return 0;
+        }
+
+
+        return Math.floor(
+            Math.random() *
+            (
+                CONFIG.jitterMs * 2 +
+                1
+            )
+        ) - CONFIG.jitterMs;
+    }
+
+
+    /* ====================================================================
+       ========================== AUTHOR FILTER ===========================
+       ==================================================================== */
+
+
+    const AUTHOR_FILTER =
+        new Set(
+            (CONFIG.authors || [])
+                .map(
+                    name =>
+                        String(name)
+                            .trim()
+                            .toLowerCase()
+                )
+                .filter(Boolean)
+        );
+
+
+    function authorIsAllowed(
+        author
+    ) {
+
+        /*
+           Empty list means:
+
+               accept everyone
+        */
+
+        if (
+            AUTHOR_FILTER.size === 0
+        ) {
+
+            return true;
+        }
+
+
+        return AUTHOR_FILTER.has(
+            String(author || "")
+                .trim()
+                .toLowerCase()
+        );
+    }
+
+
+    /* ====================================================================
+       ======================== DISCORD DOM ===============================
+       ==================================================================== */
+
+
+    /*
+       Discord changes hashed CSS class names.
+
+       Therefore we intentionally only depend on stable portions such as:
+
+           searchResultsWrap
+           search-results-
+           search-result-
+           message-username-
+    */
+
+
+    function getSearchSection() {
+
+        return document.querySelector(
+            "section[class*='searchResultsWrap']"
+        );
+    }
+
+
+    function getSearchResultItems() {
+
+        const section =
+            getSearchSection();
+
+
+        if (!section) {
+
+            return [];
+        }
+
+
+        return Array.from(
+            section.querySelectorAll(
+                "li[id^='search-results-']"
+            )
+        );
+    }
+
+
+    function getMessageId(
+        resultItem
+    ) {
+
+        const result =
+            resultItem.querySelector(
+                "[id^='search-result-']"
+            );
+
+
+        if (!result) {
+
+            return null;
+        }
+
+
+        const match =
+            result.id.match(
+                /^search-result-(.+)$/
+            );
+
+
+        return match
+            ? match[1]
+            : null;
+    }
+
+
+    /* ====================================================================
+       AUTHOR EXTRACTION
+       ==================================================================== */
+
+
+    function getAuthor(
+        resultItem,
+        messageId
+    ) {
+
+        /*
+           Avoid CSS.escape() entirely.
+
+           This makes the script less dependent on browser helpers.
+        */
+
+        const usernameElements =
+            resultItem.querySelectorAll(
+                "[id^='message-username-']"
+            );
+
+
+        for (
+            const element
+            of usernameElements
+        ) {
+
+            if (
+                messageId &&
+                element.id ===
+                    `message-username-${messageId}`
+            ) {
+
+                return element
+                    .textContent
+                    .trim();
+            }
+        }
+
+
+        if (
+            usernameElements.length
+        ) {
+
+            return usernameElements[0]
+                .textContent
+                .trim();
+        }
+
+
+        return "";
+    }
+
+
+    /* ====================================================================
+       MESSAGE CONTENT
+       ==================================================================== */
+
+
+    function getMessageContent(
+        resultItem,
+        messageId
+    ) {
+
+        /*
+           First look for the exact message-content element.
+
+           We avoid building a CSS selector from messageId so there is
+           no dependency on CSS.escape().
+        */
+
+        const contentElements =
+            resultItem.querySelectorAll(
+                "[id^='message-content-']"
+            );
+
+
+        for (
+            const element
+            of contentElements
+        ) {
+
+            if (
+                messageId &&
+                element.id ===
+                    `message-content-${messageId}`
+            ) {
+
+                return element
+                    .innerText
+                    .trim();
+            }
+        }
+
+
+        /*
+           Fallback to any message-content element.
+        */
+
+        if (
+            contentElements.length
+        ) {
+
+            return contentElements[0]
+                .innerText
+                .trim();
+        }
+
+
+        /*
+           Discord commonly uses a markup class for message content.
+        */
+
+        const markup =
+            resultItem.querySelector(
+                "[class*='markup']"
+            );
+
+
+        if (markup) {
+
+            return markup
+                .innerText
+                .trim();
+        }
+
+
+        /*
+           Last useful fallback.
+        */
+
+        const contents =
+            resultItem.querySelector(
+                "[class*='contents']"
+            );
+
+
+        if (contents) {
+
+            const innerMarkup =
+                contents.querySelector(
+                    "[class*='markup']"
+                );
+
+
+            if (innerMarkup) {
+
+                return innerMarkup
+                    .innerText
+                    .trim();
+            }
+        }
+
+
+        return "";
+    }
+
+
+    /* ====================================================================
+       TIMESTAMP
+       ==================================================================== */
+
+
+    function getTimestamp(
+        resultItem
+    ) {
+
+        const exactTime =
+            resultItem.querySelector(
+                "time[datetime]"
+            );
+
+
+        if (exactTime) {
+
+            return (
+                exactTime
+                    .getAttribute(
+                        "datetime"
+                    ) ||
+                exactTime
+                    .textContent
+                    .trim()
+            );
+        }
+
+
+        const time =
+            resultItem.querySelector(
+                "time"
+            );
+
+
+        if (time) {
+
+            return time
+                .textContent
+                .trim();
+        }
+
+
+        return "";
+    }
+
+
+    /* ====================================================================
+       ATTACHMENTS / LINKS
+       ==================================================================== */
+
+
+    function getAttachments(
+        resultItem
+    ) {
+
+        const links =
+            Array.from(
+                resultItem.querySelectorAll(
+                    "a[href]"
+                )
+            );
+
+
+        const output = [];
+
+
+        for (
+            const link
+            of links
+        ) {
+
+            const href =
+                link.href;
+
+
+            if (!href) {
+                continue;
+            }
+
+
+            if (
+                !output.includes(
+                    href
+                )
+            ) {
+
+                output.push(
+                    href
+                );
+            }
+        }
+
+
+        return output;
+    }
+
+
+    /* ====================================================================
+       EXTRACT ONE MESSAGE
+       ==================================================================== */
+
+
+    function extractMessage(
+        resultItem
+    ) {
+
+        const id =
+            getMessageId(
+                resultItem
+            );
+
+
+        if (!id) {
+
+            return null;
+        }
+
+
+        const author =
+            getAuthor(
+                resultItem,
+                id
+            );
+
+
+        if (
+            !authorIsAllowed(
+                author
+            )
+        ) {
+
+            return null;
+        }
+
+
+        return {
+
+            id,
+
+            author,
+
+            content:
+                getMessageContent(
+                    resultItem,
+                    id
+                ),
+
+            timestamp:
+                getTimestamp(
+                    resultItem
+                ),
+
+            attachments:
+                getAttachments(
+                    resultItem
+                ),
+
+            collectedAt:
+                new Date()
+                    .toISOString()
+        };
+    }
+
+
+    /* ====================================================================
+       EXTRACT CURRENT PAGE
+       ==================================================================== */
+
+
+    function extractCurrentPage() {
+
+        const items =
+            getSearchResultItems();
+
+
+        const messages = [];
+
+
+        for (
+            const item
+            of items
+        ) {
+
+            try {
+
+                const message =
+                    extractMessage(
+                        item
+                    );
+
+
+                if (message) {
+
+                    messages.push(
+                        message
+                    );
+                }
+
+            } catch (error) {
+
+                console.warn(
+                    "[DM Collector] " +
+                    "Failed to extract result:",
+                    error
+                );
+            }
+        }
+
+
+        return messages;
+    }
+
+
+    /* ====================================================================
+       =========================== PAGE SIGNATURE =========================
+       ==================================================================== */
+
+
+    function getPageSignature() {
+
+        const items =
+            getSearchResultItems();
+
+
+        if (!items.length) {
+
+            return null;
+        }
+
+
+        const ids =
+            items
+                .map(
+                    item =>
+                        getMessageId(
+                            item
+                        )
+                )
+                .filter(Boolean);
+
+
+        if (!ids.length) {
+
+            return null;
+        }
+
+
+        /*
+           Ten IDs is enough to identify a page without generating a huge
+           signature.
+        */
+
+        return ids
+            .slice(0, 10)
+            .join("|");
+    }
+
+
+    /* ====================================================================
+       ======================= PAGINATION DETECTION =======================
+       ==================================================================== */
+
+
+    function getPaginationButtons() {
+
+        const section =
+            getSearchSection();
+
+
+        if (!section) {
+
+            return [];
+        }
+
+
+        return Array.from(
+            section.querySelectorAll(
+                "button"
+            )
+        );
+    }
+
+
+    function getNextButton() {
+
+        const buttons =
+            getPaginationButtons();
+
+
+        /*
+           First pass: exact accessible names.
+        */
+
+        for (
+            const button
+            of buttons
+        ) {
+
+            const text =
+                (
+                    button.textContent ||
+                    ""
+                )
+                    .trim()
+                    .toLowerCase();
+
+
+            const aria =
+                (
+                    button.getAttribute(
+                        "aria-label"
+                    ) ||
+                    ""
+                )
+                    .trim()
+                    .toLowerCase();
+
+
+            const title =
+                (
+                    button.getAttribute(
+                        "title"
+                    ) ||
+                    ""
+                )
+                    .trim()
+                    .toLowerCase();
+
+
+            if (
+                text === "next" ||
+                text === "next page" ||
+                aria === "next" ||
+                aria === "next page" ||
+                title === "next" ||
+                title === "next page"
+            ) {
+
+                return button;
+            }
+        }
+
+
+        /*
+           Second pass: contains "next".
+        */
+
+        for (
+            const button
+            of buttons
+        ) {
+
+            const combined =
+                [
+                    button.textContent || "",
+                    button.getAttribute(
+                        "aria-label"
+                    ) || "",
+                    button.getAttribute(
+                        "title"
+                    ) || ""
+                ]
+                    .join(" ")
+                    .toLowerCase();
+
+
+            if (
+                /\bnext\b/.test(
+                    combined
+                )
+            ) {
+
+                return button;
+            }
+        }
+
+
+        return null;
+    }
+
+
+    function isButtonDisabled(
+        button
+    ) {
+
+        if (!button) {
+
+            return true;
+        }
+
+
+        return (
+            button.disabled ||
+            button.hasAttribute(
+                "disabled"
+            ) ||
+            button.getAttribute(
+                "aria-disabled"
+            ) === "true"
+        );
+    }
+
+
+    /* ====================================================================
+       CURRENT PAGE NUMBER
+       ==================================================================== */
+
+
+    function detectCurrentPageNumber() {
+
+        const section =
+            getSearchSection();
+
+
+        if (!section) {
+
+            return null;
+        }
+
+
+        /*
+           Best case: accessibility state.
+        */
+
+        const current =
+            section.querySelector(
+                "[aria-current='page']"
+            );
+
+
+        if (current) {
+
+            const text =
+                current
+                    .textContent
+                    .trim();
+
+
+            if (
+                /^\d+$/.test(
+                    text
+                )
+            ) {
+
+                return Number(
+                    text
+                );
+            }
+        }
+
+
+        /*
+           Look for common "selected/current" indicators.
+        */
+
+        const buttons =
+            getPaginationButtons();
+
+
+        for (
+            const button
+            of buttons
+        ) {
+
+            const text =
+                button
+                    .textContent
+                    .trim();
+
+
+            if (
+                !/^\d+$/.test(
+                    text
+                )
+            ) {
+
+                continue;
+            }
+
+
+            const className =
+                (
+                    button.className ||
+                    ""
+                )
+                    .toString()
+                    .toLowerCase();
+
+
+            const aria =
+                (
+                    button.getAttribute(
+                        "aria-current"
+                    ) ||
+                    ""
+                )
+                    .toLowerCase();
+
+
+            const dataCurrent =
+                (
+                    button.getAttribute(
+                        "data-current"
+                    ) ||
+                    ""
+                )
+                    .toLowerCase();
+
+
+            if (
+                className.includes(
+                    "selected"
+                ) ||
+                className.includes(
+                    "current"
+                ) ||
+                aria === "true" ||
+                dataCurrent === "true"
+            ) {
+
+                return Number(
+                    text
+                );
+            }
+        }
+
+
+        return null;
+    }
+
+
+    /* ====================================================================
+       LAST PAGE NUMBER
+       ==================================================================== */
+
+
+    function detectLastPageNumber() {
+
+        const buttons =
+            getPaginationButtons();
+
+
+        const numbers =
+            buttons
+                .map(
+                    button =>
+                        button
+                            .textContent
+                            .trim()
+                )
+                .filter(
+                    text =>
+                        /^\d+$/.test(
+                            text
+                        )
+                )
+                .map(
+                    Number
+                );
+
+
+        if (!numbers.length) {
+
+            return null;
+        }
+
+
+        return Math.max(
+            ...numbers
+        );
+    }
+
+
+    /* ====================================================================
+       TOTAL SEARCH RESULTS
+       ==================================================================== */
+
+
+    function detectTotalResults() {
+
+        const section =
+            getSearchSection();
+
+
+        if (!section) {
+
+            return null;
+        }
+
+
+        const text =
+            section.innerText ||
+            "";
+
+
+        const match =
+            text.match(
+                /([\d,]+)\s+Results?/i
+            );
+
+
+        if (!match) {
+
+            return null;
+        }
+
+
+        return Number(
+            match[1]
+                .replace(
+                    /,/g,
+                    ""
+                )
+        );
+    }
+
+
+    /* ====================================================================
+       =========================== INDEXED DB =============================
+       ==================================================================== */
+
+
+    let db = null;
+
+
+    function openDatabase() {
+
+        return new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+
+                const request =
+                    indexedDB.open(
+                        CONFIG.databaseName,
+                        1
+                    );
+
+
+                request.onupgradeneeded =
+                    event => {
+
+                        const database =
+                            event.target
+                                .result;
+
+
+                        if (
+                            !database
+                                .objectStoreNames
+                                .contains(
+                                    "messages"
+                                )
+                        ) {
+
+                            const store =
+                                database
+                                    .createObjectStore(
+                                        "messages",
+                                        {
+                                            keyPath:
+                                                "id"
+                                        }
+                                    );
+
+
+                            store.createIndex(
+                                "author",
+                                "author",
+                                {
+                                    unique:
+                                        false
+                                }
+                            );
+
+
+                            store.createIndex(
+                                "timestamp",
+                                "timestamp",
+                                {
+                                    unique:
+                                        false
+                                }
+                            );
+                        }
+                    };
+
+
+                request.onsuccess =
+                    event => {
+
+                        db =
+                            event.target
+                                .result;
+
+
+                        /*
+                           If another tab/script upgrades the database,
+                           close cleanly rather than causing strange
+                           IndexedDB failures.
+                        */
+
+                        db.onversionchange =
+                            () => {
+
+                                db.close();
+
+                                console.warn(
+                                    "[DM Collector] " +
+                                    "Database changed in another tab."
+                                );
+                            };
+
+
+                        resolve(
+                            db
+                        );
+                    };
+
+
+                request.onerror =
+                    event => {
+
+                        reject(
+                            event.target
+                                .error ||
+                            new Error(
+                                "Could not open IndexedDB."
+                            )
+                        );
+                    };
+            }
+        );
+    }
+
+
+    /* ====================================================================
+       SAVE MESSAGES
+       ==================================================================== */
+
+
+    function saveMessages(
+        messages
+    ) {
+
+        if (
+            !messages.length
+        ) {
+
+            return Promise.resolve({
+                inserted: 0,
+                duplicates: 0
+            });
+        }
+
+
+        return new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+
+                let inserted = 0;
+
+                let duplicates = 0;
+
+
+                const transaction =
+                    db.transaction(
+                        "messages",
+                        "readwrite"
+                    );
+
+
+                const store =
+                    transaction.objectStore(
+                        "messages"
+                    );
+
+
+                /*
+                   IMPORTANT BUG FIX:
+
+                   The previous version used store.add() directly and
+                   relied on ConstraintError handling.
+
+                   That can become awkward because an IndexedDB request
+                   error can interact with the surrounding transaction.
+
+                   Instead:
+
+                       1. Check whether ID already exists.
+                       2. Only add if it doesn't.
+                       3. Never intentionally create a duplicate request.
+
+                   This makes the transaction much more predictable.
+                */
+
+                for (
+                    const message
+                    of messages
+                ) {
+
+                    const getRequest =
+                        store.get(
+                            message.id
+                        );
+
+
+                    getRequest.onsuccess =
+                        () => {
+
+                            if (
+                                getRequest.result
+                            ) {
+
+                                duplicates++;
+
+                                return;
+                            }
+
+
+                            store.add(
+                                message
+                            ).onsuccess =
+                                () => {
+
+                                    inserted++;
+                                };
+                        };
+
+
+                    getRequest.onerror =
+                        () => {
+
+                            /*
+                               Let the transaction handle the failure.
+                            */
+
+                            console.warn(
+                                "[DM Collector] " +
+                                "IndexedDB lookup failed for:",
+                                message.id
+                            );
+                        };
+                }
+
+
+                transaction.oncomplete =
+                    () => {
+
+                        resolve({
+                            inserted,
+                            duplicates
+                        });
+                    };
+
+
+                transaction.onerror =
+                    event => {
+
+                        reject(
+                            event.target
+                                .error ||
+                            new Error(
+                                "IndexedDB save transaction failed."
+                            )
+                        );
+                    };
+
+
+                transaction.onabort =
+                    event => {
+
+                        reject(
+                            event.target
+                                .error ||
+                            new Error(
+                                "IndexedDB save transaction aborted."
+                            )
+                        );
+                    };
+            }
+        );
+    }
+
+
+    /* ====================================================================
+       COUNT SAVED
+       ==================================================================== */
+
+
+    function countSavedMessages() {
+
+        return new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+
+                const transaction =
+                    db.transaction(
+                        "messages",
+                        "readonly"
+                    );
+
+
+                const store =
+                    transaction.objectStore(
+                        "messages"
+                    );
+
+
+                const request =
+                    store.count();
+
+
+                request.onsuccess =
+                    () => {
+
+                        resolve(
+                            request.result
+                        );
+                    };
+
+
+                request.onerror =
+                    event => {
+
+                        reject(
+                            event.target
+                                .error
+                        );
+                    };
+            }
+        );
+    }
+
+
+    /* ====================================================================
+       READ EVERYTHING
+       ==================================================================== */
+
+
+    function readAllMessages() {
+
+        return new Promise(
+            (
+                resolve,
+                reject
+            ) => {
+
+                const transaction =
+                    db.transaction(
+                        "messages",
+                        "readonly"
+                    );
+
+
+                const store =
+                    transaction.objectStore(
+                        "messages"
+                    );
+
+
+                const request =
+                    store.getAll();
+
+
+                request.onsuccess =
+                    () => {
+
+                        resolve(
+                            request.result ||
+                            []
+                        );
+                    };
+
+
+                request.onerror =
+                    event => {
+
+                        reject(
+                            event.target
+                                .error
+                        );
+                    };
+            }
+        );
+    }
+
+
+    /* ====================================================================
+       ============================= EXPORT ===============================
+       ==================================================================== */
+
+
+    function sortMessages(
+        a,
+        b
+    ) {
+
+        const ta =
+            Date.parse(
+                a.timestamp || ""
+            );
+
+
+        const tb =
+            Date.parse(
+                b.timestamp || ""
+            );
+
+
+        if (
+            Number.isFinite(ta) &&
+            Number.isFinite(tb)
+        ) {
+
+            return ta - tb;
+        }
+
+
+        return String(a.id)
+            .localeCompare(
+                String(b.id)
+            );
+    }
+
+
+    function downloadBlob(
+        blob,
+        filename
+    ) {
+
+        const url =
+            URL.createObjectURL(
+                blob
+            );
+
+
+        const link =
+            document.createElement(
+                "a"
+            );
+
+
+        link.href =
+            url;
+
+
+        link.download =
+            filename;
+
+
+        document.body.appendChild(
+            link
+        );
+
+
+        link.click();
+
+
+        link.remove();
+
+
+        setTimeout(
+            () => {
+
+                URL.revokeObjectURL(
+                    url
+                );
+
+            },
+            5000
+        );
+    }
+
+
+    async function exportJSON() {
+
+        try {
+
+            const messages =
+                await readAllMessages();
+
+
+            messages.sort(
+                sortMessages
+            );
+
+
+            const blob =
+                new Blob(
+                    [
+                        JSON.stringify(
+                            messages,
+                            null,
+                            2
+                        )
+                    ],
+                    {
+                        type:
+                            "application/json"
+                    }
+                );
+
+
+            downloadBlob(
+                blob,
+                `${CONFIG.databaseName}.json`
+            );
+
+
+            setStatus(
+                `Exported ${formatNumber(
+                    messages.length
+                )} messages as JSON.`
+            );
+
+        } catch (error) {
+
+            console.error(
+                "[DM Collector] JSON export failed:",
+                error
+            );
+
+
+            setStatus(
+                "JSON export failed."
+            );
+        }
+    }
+
+
+    async function exportJSONL() {
+
+        try {
+
+            const messages =
+                await readAllMessages();
+
+
+            messages.sort(
+                sortMessages
+            );
+
+
+            const jsonl =
+                messages
+                    .map(
+                        message =>
+                            JSON.stringify(
+                                message
+                            )
+                    )
+                    .join("\n");
+
+
+            const blob =
+                new Blob(
+                    [jsonl],
+                    {
+                        type:
+                            "application/jsonl"
+                    }
+                );
+
+
+            downloadBlob(
+                blob,
+                `${CONFIG.databaseName}.jsonl`
+            );
+
+
+            setStatus(
+                `Exported ${formatNumber(
+                    messages.length
+                )} messages as JSONL.`
+            );
+
+        } catch (error) {
+
+            console.error(
+                "[DM Collector] JSONL export failed:",
+                error
+            );
+
+
+            setStatus(
+                "JSONL export failed."
+            );
+        }
+    }
+
+
+    /* ====================================================================
+       ============================== ETA =================================
+       ==================================================================== */
+
+
+    function addCycleSample(
+        milliseconds
+    ) {
+
+        if (
+            !Number.isFinite(
+                milliseconds
+            ) ||
+            milliseconds <= 0
+        ) {
+
+            return;
+        }
+
+
+        STATE.cycleSamples.push(
+            milliseconds
+        );
+
+
+        /*
+           Keep only the most recent samples.
+
+           This makes the ETA adapt if Discord becomes faster/slower.
+        */
+
+        while (
+            STATE.cycleSamples.length >
+            CONFIG.etaSampleCount
+        ) {
+
+            STATE.cycleSamples.shift();
+        }
+    }
+
+
+    function getAverageCycleMs() {
+
+        if (
+            !STATE.cycleSamples.length
+        ) {
+
+            return null;
+        }
+
+
+        const total =
+            STATE.cycleSamples.reduce(
+                (
+                    sum,
+                    value
+                ) =>
+                    sum + value,
+                0
+            );
+
+
+        return (
+            total /
+            STATE.cycleSamples.length
+        );
+    }
+
+
+    function getPagesRemaining() {
+
+        if (
+            STATE.currentPage === null ||
+            STATE.totalPages === null
+        ) {
+
+            return null;
+        }
+
+
+        return Math.max(
+            0,
+            STATE.totalPages -
+            STATE.currentPage
+        );
+    }
+
+
+    function getEtaMs() {
+
+        const remaining =
+            getPagesRemaining();
+
+
+        const average =
+            getAverageCycleMs();
+
+
+        if (
+            remaining === null ||
+            average === null
+        ) {
+
+            return null;
+        }
+
+
+        /*
+           If we're already on the last page, ETA is zero.
+        */
+
+        if (
+            remaining <= 0
+        ) {
+
+            return 0;
+        }
+
+
+        return (
+            remaining *
+            average
+        );
+    }
+
+
+    function getEtaText() {
+
+        const remaining =
+            getPagesRemaining();
+
+
+        if (
+            remaining === null
+        ) {
+
+            return "Calculating…";
+        }
+
+
+        if (
+            remaining === 0
+        ) {
+
+            return "Complete";
+        }
+
+
+        const eta =
+            getEtaMs();
+
+
+        if (
+            eta === null
+        ) {
+
+            return "Calculating…";
+        }
+
+
+        return (
+            `${formatShortDuration(
+                eta
+            )} ` +
+            `(≈ ${formatEtaClock(
+                eta
+            )})`
+        );
+    }
+
+
+    /* ====================================================================
+       =============================== GUI ================================
+       ==================================================================== */
+
+
+    let GUI =
+        null;
+
+
+    function createGui() {
+
+        const existing =
+            document.getElementById(
+                "discord-dm-search-collector-v51"
+            );
+
+
+        if (existing) {
+
+            existing.remove();
+        }
+
+
+        const panel =
+            document.createElement(
+                "div"
+            );
+
+
+        panel.id =
+            "discord-dm-search-collector-v51";
+
+
+        panel.innerHTML = `
+
+            <div class="dm51-header">
+
+                <div class="dm51-title">
+                    Discord DM Collector v5.1
+                </div>
+
+                <div class="dm51-drag">
+                    DRAG
+                </div>
+
+            </div>
+
+
+            <div class="dm51-body">
+
+                <div class="dm51-status">
+                    Starting...
+                </div>
+
+
+                <div class="dm51-grid">
+
+                    <div>Authors</div>
+                    <div class="value authors"></div>
+
+
+                    <div>Database</div>
+                    <div class="value database"></div>
+
+
+                    <div>Page</div>
+                    <div class="value page">—</div>
+
+
+                    <div>Remaining</div>
+                    <div class="value remaining">—</div>
+
+
+                    <div>Results</div>
+                    <div class="value results">—</div>
+
+
+                    <div>Saved</div>
+                    <div class="value saved">0</div>
+
+
+                    <div>Delay</div>
+                    <div class="value delay">—</div>
+
+
+                    <div>Last load</div>
+                    <div class="value load">—</div>
+
+
+                    <div>ETA</div>
+                    <div class="value eta">Calculating…</div>
+
+
+                    <div>Avg/page</div>
+                    <div class="value avg">—</div>
+
+
+                    <div>Visibility</div>
+                    <div class="value visibility">—</div>
+
+                </div>
+
+
+                <div class="dm51-progress">
+                    <div class="dm51-progress-bar"></div>
+                </div>
+
+
+                <div class="dm51-buttons">
+
+                    <button
+                        class="dm51-btn pause"
+                    >
+                        PAUSE
+                    </button>
+
+
+                    <button
+                        class="dm51-btn stop"
+                    >
+                        STOP & SAVE
+                    </button>
+
+
+                    <button
+                        class="dm51-btn json"
+                    >
+                        EXPORT JSON
+                    </button>
+
+
+                    <button
+                        class="dm51-btn jsonl"
+                    >
+                        EXPORT JSONL
+                    </button>
+
+                </div>
+
+
+                <div class="dm51-footer">
+                    DOM-only • IndexedDB • adaptive ETA
+                </div>
+
+            </div>
+        `;
+
+
+        const style =
+            document.createElement(
+                "style"
+            );
+
+
+        style.textContent = `
+
+            #discord-dm-search-collector-v51 {
+
+                position: fixed;
+
+                top: 80px;
+
+                right: 20px;
+
+                width: 385px;
+
+                z-index: 2147483647;
+
+                background:
+                    rgba(20,20,24,.97);
+
+                color:
+                    #f2f3f5;
+
+                border:
+                    1px solid
+                    rgba(255,255,255,.16);
+
+                border-radius:
+                    10px;
+
+                box-shadow:
+                    0 10px 35px
+                    rgba(0,0,0,.45);
+
+                font-family:
+                    Arial,
+                    Helvetica,
+                    sans-serif;
+
+                font-size:
+                    12px;
+
+                overflow:
+                    hidden;
+
+                user-select:
+                    none;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-header {
+
+                height:
+                    38px;
+
+                display:
+                    flex;
+
+                align-items:
+                    center;
+
+                justify-content:
+                    space-between;
+
+                padding:
+                    0 10px;
+
+                background:
+                    rgba(255,255,255,.07);
+
+                cursor:
+                    move;
+
+                touch-action:
+                    none;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-title {
+
+                font-weight:
+                    700;
+
+                font-size:
+                    13px;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-drag {
+
+                font-size:
+                    9px;
+
+                opacity:
+                    .45;
+
+                letter-spacing:
+                    1px;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-body {
+
+                padding:
+                    12px;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-status {
+
+                padding:
+                    8px;
+
+                margin-bottom:
+                    10px;
+
+                border-radius:
+                    6px;
+
+                background:
+                    rgba(255,255,255,.06);
+
+                line-height:
+                    1.35;
+
+                min-height:
+                    17px;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-grid {
+
+                display:
+                    grid;
+
+                grid-template-columns:
+                    90px 1fr;
+
+                gap:
+                    6px 8px;
+
+                line-height:
+                    1.3;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-grid > div:nth-child(odd) {
+
+                opacity:
+                    .55;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-grid .value {
+
+                overflow:
+                    hidden;
+
+                text-overflow:
+                    ellipsis;
+
+                white-space:
+                    nowrap;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-progress {
+
+                height:
+                    4px;
+
+                margin:
+                    12px 0;
+
+                background:
+                    rgba(255,255,255,.10);
+
+                border-radius:
+                    10px;
+
+                overflow:
+                    hidden;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-progress-bar {
+
+                width:
+                    0%;
+
+                height:
+                    100%;
+
+                background:
+                    #5865f2;
+
+                transition:
+                    width .25s ease;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-buttons {
+
+                display:
+                    grid;
+
+                grid-template-columns:
+                    1fr 1fr;
+
+                gap:
+                    6px;
+            }
+
+
+            #discord-dm-search-collector-v51
+            button {
+
+                border:
+                    0;
+
+                border-radius:
+                    5px;
+
+                padding:
+                    7px 5px;
+
+                color:
+                    white;
+
+                background:
+                    rgba(255,255,255,.10);
+
+                cursor:
+                    pointer;
+
+                font-size:
+                    10px;
+
+                font-weight:
+                    700;
+            }
+
+
+            #discord-dm-search-collector-v51
+            button:hover {
+
+                background:
+                    rgba(255,255,255,.18);
+            }
+
+
+            #discord-dm-search-collector-v51
+            button.stop {
+
+                background:
+                    rgba(220,70,70,.65);
+            }
+
+
+            #discord-dm-search-collector-v51
+            button.pause {
+
+                background:
+                    rgba(88,101,242,.75);
+            }
+
+
+            #discord-dm-search-collector-v51
+            button:disabled {
+
+                opacity:
+                    .45;
+
+                cursor:
+                    default;
+            }
+
+
+            #discord-dm-search-collector-v51
+            .dm51-footer {
+
+                margin-top:
+                    9px;
+
+                text-align:
+                    center;
+
+                opacity:
+                    .35;
+
+                font-size:
+                    9px;
+            }
+
+        `;
+
+
+        document.head.appendChild(
+            style
+        );
+
+
+        document.body.appendChild(
+            panel
+        );
+
+
+        GUI = {
+
+            panel,
+
+            header:
+                panel.querySelector(
+                    ".dm51-header"
+                ),
+
+            status:
+                panel.querySelector(
+                    ".dm51-status"
+                ),
+
+            authors:
+                panel.querySelector(
+                    ".authors"
+                ),
+
+            database:
+                panel.querySelector(
+                    ".database"
+                ),
+
+            page:
+                panel.querySelector(
+                    ".page"
+                ),
+
+            remaining:
+                panel.querySelector(
+                    ".remaining"
+                ),
+
+            results:
+                panel.querySelector(
+                    ".results"
+                ),
+
+            saved:
+                panel.querySelector(
+                    ".saved"
+                ),
+
+            delay:
+                panel.querySelector(
+                    ".delay"
+                ),
+
+            load:
+                panel.querySelector(
+                    ".load"
+                ),
+
+            eta:
+                panel.querySelector(
+                    ".eta"
+                ),
+
+            avg:
+                panel.querySelector(
+                    ".avg"
+                ),
+
+            visibility:
+                panel.querySelector(
+                    ".visibility"
+                ),
+
+            progress:
+                panel.querySelector(
+                    ".dm51-progress-bar"
+                ),
+
+            pause:
+                panel.querySelector(
+                    ".pause"
+                ),
+
+            stop:
+                panel.querySelector(
+                    ".stop"
+                ),
+
+            json:
+                panel.querySelector(
+                    ".json"
+                ),
+
+            jsonl:
+                panel.querySelector(
+                    ".jsonl"
+                )
+        };
+
+
+        GUI.authors.textContent =
+            CONFIG.authors.length
+                ? CONFIG.authors.join(
+                    ", "
+                )
+                : "ALL AUTHORS";
+
+
+        GUI.database.textContent =
+            CONFIG.databaseName;
+
+
+        GUI.pause.addEventListener(
+            "click",
+            () => {
+
+                STATE.paused =
+                    !STATE.paused;
+
+
+                setStatus(
+                    STATE.paused
+                        ? "Paused manually."
+                        : "Resuming..."
+                );
+
+
+                updateGui();
+            }
+        );
+
+
+        GUI.stop.addEventListener(
+            "click",
+            () => {
+
+                stopCollector(
+                    "Stopped manually. Everything collected so far is saved."
+                );
+            }
+        );
+
+
+        GUI.json.addEventListener(
+            "click",
+            exportJSON
+        );
+
+
+        GUI.jsonl.addEventListener(
+            "click",
+            exportJSONL
+        );
+
+
+        makeDraggable(
+            panel,
+            GUI.header
+        );
+
+
+        restoreGuiPosition(
+            panel
+        );
+
+
+        updateGui();
+    }
+
+
+    /* ====================================================================
+       ============================ DRAGGING ==============================
+       ==================================================================== */
+
+
+    function guiPositionKey() {
+
+        return (
+            "discord-dm-collector-v51-position-" +
+            CONFIG.databaseName
+        );
+    }
+
+
+    function saveGuiPosition(
+        panel
+    ) {
+
+        if (
+            !CONFIG.rememberGuiPosition
+        ) {
+
+            return;
+        }
+
+
+        try {
+
+            localStorage.setItem(
+                guiPositionKey(),
+                JSON.stringify({
+                    left:
+                        panel.offsetLeft,
+
+                    top:
+                        panel.offsetTop
+                })
+            );
+
+        } catch (_) {}
+    }
+
+
+    function restoreGuiPosition(
+        panel
+    ) {
+
+        if (
+            !CONFIG.rememberGuiPosition
+        ) {
+
+            return;
+        }
+
+
+        try {
+
+            const raw =
+                localStorage.getItem(
+                    guiPositionKey()
+                );
+
+
+            if (!raw) {
+                return;
+            }
+
+
+            const position =
+                JSON.parse(
+                    raw
+                );
+
+
+            if (
+                typeof position.left !==
+                    "number" ||
+                typeof position.top !==
+                    "number"
+            ) {
+
+                return;
+            }
+
+
+            panel.style.left =
+                `${clamp(
+                    position.left,
+                    0,
+                    window.innerWidth -
+                        panel.offsetWidth
+                )}px`;
+
+
+            panel.style.top =
+                `${clamp(
+                    position.top,
+                    0,
+                    window.innerHeight -
+                        panel.offsetHeight
+                )}px`;
+
+
+            panel.style.right =
+                "auto";
+
+        } catch (_) {}
+    }
+
+
+    function makeDraggable(
+        panel,
+        handle
+    ) {
+
+        let dragging =
+            false;
+
+
+        let startX =
+            0;
+
+
+        let startY =
+            0;
+
+
+        let startLeft =
+            0;
+
+
+        let startTop =
+            0;
+
+
+        handle.addEventListener(
+            "pointerdown",
+            event => {
+
+                if (
+                    event.button !== 0
+                ) {
+
+                    return;
+                }
+
+
+                dragging =
+                    true;
+
+
+                const rect =
+                    panel.getBoundingClientRect();
+
+
+                startX =
+                    event.clientX;
+
+
+                startY =
+                    event.clientY;
+
+
+                startLeft =
+                    rect.left;
+
+
+                startTop =
+                    rect.top;
+
+
+                panel.style.left =
+                    `${rect.left}px`;
+
+
+                panel.style.top =
+                    `${rect.top}px`;
+
+
+                panel.style.right =
+                    "auto";
+
+
+                try {
+
+                    handle.setPointerCapture(
+                        event.pointerId
+                    );
+
+                } catch (_) {}
+
+
+                event.preventDefault();
+            }
+        );
+
+
+        handle.addEventListener(
+            "pointermove",
+            event => {
+
+                if (!dragging) {
+
+                    return;
+                }
+
+
+                const left =
+                    clamp(
+                        startLeft +
+                            (
+                                event.clientX -
+                                startX
+                            ),
+                        0,
+                        window.innerWidth -
+                            panel.offsetWidth
+                    );
+
+
+                const top =
+                    clamp(
+                        startTop +
+                            (
+                                event.clientY -
+                                startY
+                            ),
+                        0,
+                        window.innerHeight -
+                            panel.offsetHeight
+                    );
+
+
+                panel.style.left =
+                    `${left}px`;
+
+
+                panel.style.top =
+                    `${top}px`;
+            }
+        );
+
+
+        handle.addEventListener(
+            "pointerup",
+            event => {
+
+                dragging =
+                    false;
+
+
+                try {
+
+                    handle.releasePointerCapture(
+                        event.pointerId
+                    );
+
+                } catch (_) {}
+
+
+                saveGuiPosition(
+                    panel
+                );
+            }
+        );
+
+
+        handle.addEventListener(
+            "pointercancel",
+            () => {
+
+                dragging =
+                    false;
+
+
+                saveGuiPosition(
+                    panel
+                );
+            }
+        );
+    }
+
+
+    /* ====================================================================
+       ========================== GUI UPDATE ==============================
+       ==================================================================== */
+
+
+    function setStatus(
+        message
+    ) {
+
+        STATE.currentStatus =
+            String(
+                message
+            );
+
+
+        if (
+            GUI &&
+            GUI.status
+        ) {
+
+            GUI.status.textContent =
+                STATE.currentStatus;
+        }
+    }
+
+
+    function updateGui() {
+
+        if (!GUI) {
+
+            return;
+        }
+
+
+        const remaining =
+            getPagesRemaining();
+
+
+        const average =
+            getAverageCycleMs();
+
+
+        GUI.page.textContent =
+            STATE.currentPage !== null
+                ? (
+                    STATE.totalPages
+                        ? `${STATE.currentPage} / ${STATE.totalPages}`
+                        : `${STATE.currentPage}`
+                )
+                : "—";
+
+
+        GUI.remaining.textContent =
+            remaining !== null
+                ? formatNumber(
+                    remaining
+                )
+                : "—";
+
+
+        GUI.results.textContent =
+            STATE.totalResults !== null
+                ? formatNumber(
+                    STATE.totalResults
+                )
+                : "—";
+
+
+        GUI.saved.textContent =
+            formatNumber(
+                STATE.savedCount
+            );
+
+
+        GUI.delay.textContent =
+            `${(
+                STATE.currentDelay /
+                1000
+            ).toFixed(1)}s`;
+
+
+        GUI.load.textContent =
+            STATE.currentPageLoadMs !== null
+                ? formatShortDuration(
+                    STATE.currentPageLoadMs
+                )
+                : "—";
+
+
+        GUI.eta.textContent =
+            getEtaText();
+
+
+        GUI.avg.textContent =
+            average !== null
+                ? formatShortDuration(
+                    average
+                )
+                : "—";
+
+
+        GUI.visibility.textContent =
+            document.visibilityState;
+
+
+        GUI.status.textContent =
+            STATE.currentStatus;
+
+
+        GUI.pause.textContent =
+            STATE.paused
+                ? "RESUME"
+                : "PAUSE";
+
+
+        GUI.stop.disabled =
+            STATE.stopped;
+
+
+        GUI.pause.disabled =
+            STATE.stopped;
+
+
+        if (
+            STATE.totalPages !== null &&
+            STATE.currentPage !== null
+        ) {
+
+            const percentage =
+                clamp(
+                    (
+                        STATE.currentPage /
+                        STATE.totalPages
+                    ) * 100,
+                    0,
+                    100
+                );
+
+
+            GUI.progress.style.width =
+                `${percentage}%`;
+
+        } else {
+
+            GUI.progress.style.width =
+                "0%";
+        }
+    }
+
+
+    /* ====================================================================
+       ========================= PAUSE WAIT ===============================
+       ==================================================================== */
+
+
+    async function waitWhilePaused() {
+
+        while (
+            STATE.paused &&
+            !STATE.stopped
+        ) {
+
+            updateGui();
+
+            await sleep(
+                500
+            );
+        }
+    }
+
+
+    /* ====================================================================
+       =========================== ADAPTIVE WAIT ==========================
+       ==================================================================== */
+
+
+    async function adaptiveWait(
+        milliseconds
+    ) {
+
+        let remaining =
+            milliseconds;
+
+
+        while (
+            remaining > 0 &&
+            !STATE.stopped
+        ) {
+
+            if (
+                STATE.paused
+            ) {
+
+                setStatus(
+                    "Paused — waiting for RESUME..."
+                );
+
+
+                await waitWhilePaused();
+
+
+                if (
+                    STATE.stopped
+                ) {
+
+                    return;
+                }
+            }
+
+
+            const step =
+                Math.min(
+                    1000,
+                    remaining
+                );
+
+
+            await sleep(
+                step
+            );
+
+
+            remaining -=
+                step;
+
+
+            if (
+                remaining > 0 &&
+                !STATE.paused
+            ) {
+
+                setStatus(
+                    `Waiting ${Math.ceil(
+                        remaining / 1000
+                    )}s before next page...`
+                );
+
+
+                updateGui();
+            }
+        }
+    }
+
+
+    /* ====================================================================
+       ======================= WAIT FOR PAGE CHANGE =======================
+       ==================================================================== */
+
+
+    async function waitForPageChange(
+        previousSignature
+    ) {
+
+        const started =
+            Date.now();
+
+
+        while (
+            Date.now() -
+                started <
+            CONFIG.pageLoadTimeoutMs
+        ) {
+
+            if (
+                STATE.stopped
+            ) {
+
+                return {
+                    stopped:
+                        true
+                };
+            }
+
+
+            if (
+                !getSearchSection()
+            ) {
+
+                return {
+                    searchDisappeared:
+                        true
+                };
+            }
+
+
+            const signature =
+                getPageSignature();
+
+
+            if (
+                signature &&
+                signature !==
+                    previousSignature
+            ) {
+
+                return {
+
+                    changed:
+                        true,
+
+                    loadMs:
+                        Date.now() -
+                        started
+                };
+            }
+
+
+            await sleep(
+                500
+            );
+        }
+
+
+        return {
+            timeout:
+                true
+        };
+    }
+
+
+    /* ====================================================================
+       ======================= ADAPTIVE FEEDBACK ==========================
+       ==================================================================== */
+
+
+    function handleSuccessfulPage(
+        loadMs,
+        cycleMs
+    ) {
+
+        STATE.currentPageLoadMs =
+            loadMs;
+
+
+        STATE.throttleStrikes =
+            0;
+
+
+        addCycleSample(
+            cycleMs
+        );
+
+
+        /*
+           Healthy page.
+        */
+
+        if (
+            loadMs <=
+            CONFIG.slowPageLoadMs
+        ) {
+
+            STATE.successfulPages++;
+
+
+            if (
+                STATE.successfulPages >=
+                CONFIG.successfulPagesBeforeSpeedup
+            ) {
+
+                STATE.currentDelay =
+                    clamp(
+                        STATE.currentDelay -
+                            CONFIG.delayStepMs,
+                        CONFIG.minimumDelayMs,
+                        CONFIG.maximumDelayMs
+                    );
+
+
+                STATE.successfulPages =
+                    0;
+            }
+
+
+        } else {
+
+            /*
+               Slow page.
+
+               Immediately become more conservative.
+            */
+
+            STATE.successfulPages =
+                0;
+
+
+            STATE.currentDelay =
+                clamp(
+                    STATE.currentDelay +
+                        CONFIG.delayStepMs,
+                    CONFIG.minimumDelayMs,
+                    CONFIG.maximumDelayMs
+                );
+        }
+
+
+        updateGui();
+    }
+
+
+    /* ====================================================================
+       ======================= FAILURE HANDLING ============================
+       ==================================================================== */
+
+
+    async function handleFailedPage(
+        reason
+    ) {
+
+        STATE.throttleStrikes++;
+
+        STATE.successfulPages =
+            0;
+
+
+        STATE.currentDelay =
+            clamp(
+                STATE.currentDelay +
+                    (
+                        CONFIG.delayStepMs *
+                        2
+                    ),
+                CONFIG.minimumDelayMs,
+                CONFIG.maximumDelayMs
+            );
+
+
+        const cooldown =
+            clamp(
+                CONFIG.cooldownAfterFailureMs *
+                    Math.pow(
+                        2,
+                        STATE.throttleStrikes -
+                            1
+                    ),
+                CONFIG.cooldownAfterFailureMs,
+                CONFIG.maximumCooldownMs
+            );
+
+
+        STATE.paused =
+            true;
+
+
+        setStatus(
+            `${reason} Safety pause activated.`
+        );
+
+
+        updateGui();
+
+
+        let remaining =
+            cooldown;
+
+
+        while (
+            remaining > 0 &&
+            !STATE.stopped
+        ) {
+
+            setStatus(
+                `${reason} ` +
+                `Safety cooldown: ` +
+                `${Math.ceil(
+                    remaining / 1000
+                )}s`
+            );
+
+
+            updateGui();
+
+
+            await sleep(
+                Math.min(
+                    1000,
+                    remaining
+                )
+            );
+
+
+            remaining -=
+                1000;
+        }
+
+
+        if (
+            !STATE.stopped
+        ) {
+
+            setStatus(
+                `${reason} ` +
+                `Cooldown finished. ` +
+                `Check Discord, then press RESUME.`
+            );
+
+
+            updateGui();
+        }
+    }
+
+
+    /* ====================================================================
+       ============================== STOP ================================
+       ==================================================================== */
+
+
+    async function stopCollector(
+        message
+    ) {
+
+        if (
+            STATE.stopped
+        ) {
+
+            return;
+        }
+
+
+        STATE.stopped =
+            true;
+
+
+        STATE.paused =
+            false;
+
+
+        setStatus(
+            message
+        );
+
+
+        if (GUI) {
+
+            GUI.pause.disabled =
+                true;
+
+
+            GUI.stop.disabled =
+                true;
+        }
+
+
+        try {
+
+            STATE.savedCount =
+                await countSavedMessages();
+
+
+            setStatus(
+                `Stopped safely. ` +
+                `${formatNumber(
+                    STATE.savedCount
+                )} messages stored in IndexedDB.`
+            );
+
+
+            updateGui();
+
+        } catch (error) {
+
+            console.error(
+                "[DM Collector] " +
+                "Final count failed:",
+                error
+            );
+        }
+    }
+
+
+    /* ====================================================================
+       ============================ MAIN LOOP =============================
+       ==================================================================== */
+
+
+    async function runCollector() {
+
+        if (
+            STATE.running
+        ) {
+
+            console.warn(
+                "[DM Collector] " +
+                "Collector is already running."
+            );
+
+
+            return;
+        }
+
+
+        STATE.running =
+            true;
+
+
+        try {
+
+            /* ------------------------------------------------------------
+               OPEN DATABASE
+               ------------------------------------------------------------ */
+
+            setStatus(
+                "Opening IndexedDB..."
+            );
+
+
+            await openDatabase();
+
+
+            STATE.savedCount =
+                await countSavedMessages();
+
+
+            updateGui();
+
+
+            setStatus(
+                `Database ready — ` +
+                `${formatNumber(
+                    STATE.savedCount
+                )} messages already saved.`
+            );
+
+
+            /* ------------------------------------------------------------
+               WAIT FOR SEARCH RESULTS
+               ------------------------------------------------------------ */
+
+            while (
+                !STATE.stopped
+            ) {
+
+                if (
+                    getSearchSection()
+                ) {
+
+                    break;
+                }
+
+
+                setStatus(
+                    "Waiting for Discord Search Results..."
+                );
+
+
+                updateGui();
+
+
+                await sleep(
+                    1000
+                );
+            }
+
+
+            if (
+                STATE.stopped
+            ) {
+
+                return;
+            }
+
+
+            /* ------------------------------------------------------------
+               INITIAL PAGE INFORMATION
+               ------------------------------------------------------------ */
+
+            const detectedPage =
+                detectCurrentPageNumber();
+
+
+            const detectedTotal =
+                detectLastPageNumber();
+
+
+            /*
+               IMPORTANT:
+
+               If Discord doesn't expose the active page number clearly,
+               we do NOT pretend we're on page 1.
+
+               ETA will simply remain "Calculating…" until reliable page
+               information exists.
+            */
+
+            STATE.currentPage =
+                detectedPage;
+
+
+            STATE.totalPages =
+                detectedTotal;
+
+
+            STATE.totalResults =
+                detectTotalResults();
+
+
+            STATE.lastPageSignature =
+                getPageSignature();
+
+
+            updateGui();
+
+
+            /* ------------------------------------------------------------
+               MAIN LOOP
+               ------------------------------------------------------------ */
+
+            while (
+                !STATE.stopped
+            ) {
+
+                /* --------------------------------------------------------
+                   MANUAL PAUSE
+                   -------------------------------------------------------- */
+
+                await waitWhilePaused();
+
+
+                if (
+                    STATE.stopped
+                ) {
+
+                    break;
+                }
+
+
+                /* --------------------------------------------------------
+                   MAKE SURE SEARCH STILL EXISTS
+                   -------------------------------------------------------- */
+
+                if (
+                    !getSearchSection()
+                ) {
+
+                    if (
+                        CONFIG.pauseIfSearchDisappears
+                    ) {
+
+                        STATE.paused =
+                            true;
+
+
+                        setStatus(
+                            "Search results disappeared. Restore Discord search, then press RESUME."
+                        );
+
+
+                        continue;
+                    }
+
+
+                    break;
+                }
+
+
+                /* --------------------------------------------------------
+                   COLLECT CURRENT PAGE
+                   -------------------------------------------------------- */
+
+                const messages =
+                    extractCurrentPage();
+
+
+                let saveResult;
+
+
+                try {
+
+                    saveResult =
+                        await saveMessages(
+                            messages
+                        );
+
+                } catch (error) {
+
+                    console.error(
+                        "[DM Collector] " +
+                        "Save failed:",
+                        error
+                    );
+
+
+                    STATE.paused =
+                        true;
+
+
+                    setStatus(
+                        `Database error: ${
+                            error.message ||
+                            error
+                        }`
+                    );
+
+
+                    continue;
+                }
+
+
+                STATE.savedCount =
+                    await countSavedMessages();
+
+
+                STATE.pagesCollectedThisRun++;
+
+
+                setStatus(
+                    `Page collected — ` +
+                    `+${formatNumber(
+                        saveResult.inserted
+                    )} new, ` +
+                    `${formatNumber(
+                        saveResult.duplicates
+                    )} already saved.`
+                );
+
+
+                /* --------------------------------------------------------
+                   REFRESH PAGINATION INFO
+                   -------------------------------------------------------- */
+
+                const newlyDetectedPage =
+                    detectCurrentPageNumber();
+
+
+                const newlyDetectedTotal =
+                    detectLastPageNumber();
+
+
+                if (
+                    newlyDetectedPage !== null
+                ) {
+
+                    STATE.currentPage =
+                        newlyDetectedPage;
+
+                } else if (
+                    STATE.currentPage !== null
+                ) {
+
+                    /*
+                       If Discord doesn't expose the active page on a
+                       particular render, keep our last known value.
+                    */
+                }
+
+
+                if (
+                    newlyDetectedTotal !== null
+                ) {
+
+                    STATE.totalPages =
+                        newlyDetectedTotal;
+                }
+
+
+                const totalResults =
+                    detectTotalResults();
+
+
+                if (
+                    totalResults !== null
+                ) {
+
+                    STATE.totalResults =
+                        totalResults;
+                }
+
+
+                updateGui();
+
+
+                /* --------------------------------------------------------
+                   FIND NEXT
+                   -------------------------------------------------------- */
+
+                const next =
+                    getNextButton();
+
+
+                if (!next) {
+
+                    setStatus(
+                        "Next button not found. Collection paused."
+                    );
+
+
+                    STATE.paused =
+                        true;
+
+
+                    continue;
+                }
+
+
+                if (
+                    isButtonDisabled(
+                        next
+                    )
+                ) {
+
+                    setStatus(
+                        "Reached the end of the available search pages."
+                    );
+
+
+                    break;
+                }
+
+
+                /* --------------------------------------------------------
+                   WAIT BEFORE NEXT PAGE
+                   -------------------------------------------------------- */
+
+                const waitTime =
+                    clamp(
+                        STATE.currentDelay +
+                            randomJitter(),
+                        CONFIG.minimumDelayMs,
+                        CONFIG.maximumDelayMs
+                    );
+
+
+                await adaptiveWait(
+                    waitTime
+                );
+
+
+                if (
+                    STATE.stopped
+                ) {
+
+                    break;
+                }
+
+
+                await waitWhilePaused();
+
+
+                if (
+                    STATE.stopped
+                ) {
+
+                    break;
+                }
+
+
+                /* --------------------------------------------------------
+                   CAPTURE CURRENT PAGE SIGNATURE
+                   -------------------------------------------------------- */
+
+                const previousSignature =
+                    getPageSignature();
+
+
+                if (!previousSignature) {
+
+                    await handleFailedPage(
+                        "Could not identify the current search page."
+                    );
+
+
+                    continue;
+                }
+
+
+                /* --------------------------------------------------------
+                   CLICK NEXT
+                   -------------------------------------------------------- */
+
+                const freshNext =
+                    getNextButton();
+
+
+                if (
+                    !freshNext ||
+                    isButtonDisabled(
+                        freshNext
+                    )
+                ) {
+
+                    setStatus(
+                        "Next is no longer available. Collection finished."
+                    );
+
+
+                    break;
+                }
+
+
+                /*
+                   Start timing the complete page cycle.
+
+                   This includes the time between pages and Discord's
+                   actual loading time, which makes the ETA much more
+                   realistic.
+                */
+
+                STATE.lastCycleStartedAt =
+                    Date.now();
+
+
+                STATE.pageStartedAt =
+                    Date.now();
+
+
+                freshNext.click();
+
+
+                /* --------------------------------------------------------
+                   WAIT FOR NEW PAGE
+                   -------------------------------------------------------- */
+
+                const result =
+                    await waitForPageChange(
+                        previousSignature
+                    );
+
+
+                if (
+                    STATE.stopped
+                ) {
+
+                    break;
+                }
+
+
+                /* --------------------------------------------------------
+                   SUCCESS
+                   -------------------------------------------------------- */
+
+                if (
+                    result.changed
+                ) {
+
+                    const cycleMs =
+                        STATE.lastCycleStartedAt
+                            ? Date.now() -
+                                STATE.lastCycleStartedAt
+                            : null;
+
+
+                    /*
+                       If Discord doesn't expose the current page number,
+                       but we previously knew it, advance it manually.
+
+                       This is safer than guessing page 1.
+                    */
+
+                    const detectedAfterChange =
+                        detectCurrentPageNumber();
+
+
+                    if (
+                        detectedAfterChange !== null
+                    ) {
+
+                        STATE.currentPage =
+                            detectedAfterChange;
+
+                    } else if (
+                        STATE.currentPage !== null
+                    ) {
+
+                        STATE.currentPage++;
+                    }
+
+
+                    const latestTotal =
+                        detectLastPageNumber();
+
+
+                    if (
+                        latestTotal !== null
+                    ) {
+
+                        STATE.totalPages =
+                            latestTotal;
+                    }
+
+
+                    const latestResults =
+                        detectTotalResults();
+
+
+                    if (
+                        latestResults !== null
+                    ) {
+
+                        STATE.totalResults =
+                            latestResults;
+                    }
+
+
+                    handleSuccessfulPage(
+                        result.loadMs,
+                        cycleMs
+                    );
+
+
+                    setStatus(
+                        `Page ${
+                            STATE.currentPage ??
+                            "?"
+                        } loaded in ` +
+                        `${formatShortDuration(
+                            result.loadMs
+                        )} — ` +
+                        `ETA ${getEtaText()}`
+                    );
+
+
+                    updateGui();
+
+
+                    continue;
+                }
+
+
+                /* --------------------------------------------------------
+                   SEARCH DISAPPEARED
+                   -------------------------------------------------------- */
+
+                if (
+                    result.searchDisappeared
+                ) {
+
+                    await handleFailedPage(
+                        "Discord search disappeared."
+                    );
+
+
+                    continue;
+                }
+
+
+                /* --------------------------------------------------------
+                   TIMEOUT
+                   -------------------------------------------------------- */
+
+                if (
+                    result.timeout
+                ) {
+
+                    if (
+                        CONFIG.pauseAfterFailedPage
+                    ) {
+
+                        await handleFailedPage(
+                            "Next page did not appear before timeout."
+                        );
+
+
+                        continue;
+                    }
+
+
+                    break;
+                }
+
+
+                /* --------------------------------------------------------
+                   UNKNOWN FAILURE
+                   -------------------------------------------------------- */
+
+                await handleFailedPage(
+                    "The page did not change."
+                );
+            }
+
+
+        } catch (error) {
+
+            STATE.lastError =
+                error;
+
+
+            console.error(
+                "[DM Collector] Fatal error:",
+                error
+            );
+
+
+            setStatus(
+                `ERROR: ${
+                    error.message ||
+                    error
+                }`
+            );
+
+
+        } finally {
+
+            STATE.running =
+                false;
+
+
+            updateGui();
+        }
+    }
+
+
+    /* ====================================================================
+       ========================= CONSOLE API =============================
+       ====================================================================
+
+       Optional emergency controls.
+
+       You can type these into the console:
+
+           DMCollector.pause()
+
+           DMCollector.resume()
+
+           DMCollector.stop()
+
+           DMCollector.exportJSON()
+
+           DMCollector.exportJSONL()
+
+           DMCollector.state()
+
+       ==================================================================== */
+
+
+    window.DMCollector = {
+
+        pause() {
+
+            STATE.paused =
+                true;
+
+
+            setStatus(
+                "Paused from console."
+            );
+
+
+            updateGui();
+        },
+
+
+        resume() {
+
+            STATE.paused =
+                false;
+
+
+            setStatus(
+                "Resumed from console."
+            );
+
+
+            updateGui();
+        },
+
+
+        stop() {
+
+            stopCollector(
+                "Stopped from console."
+            );
+        },
+
+
+        exportJSON,
+
+        exportJSONL,
+
+
+        state() {
+
+            return {
+                ...STATE,
+                eta:
+                    getEtaText(),
+                averagePageTime:
+                    getAverageCycleMs()
+            };
+        }
+    };
+
+
+    /* ====================================================================
+       ============================== START ===============================
+       ==================================================================== */
+
+
+    createGui();
+
+
+    runCollector();
+
+
+    console.log(
+        "%c[DM Collector v5.1]%c Started.",
+        "font-weight:bold;",
+        ""
+    );
+
+
+    console.log(
+        "[DM Collector v5.1] Configuration:",
+        CONFIG
+    );
+
+
+    console.log(
+        "[DM Collector v5.1] Existing IndexedDB database:",
+        CONFIG.databaseName
+    );
+
+
+})();
