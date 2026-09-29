@@ -3,7 +3,7 @@
 Tokenless Discord Text extractor\
 **IMPORTANT: This script is completely tokenless and can't collect deleted messages**\
 How to use:\
-Download or copy the txt\
+Download or copy the extractor\
 Edit the authors/users (Display names) you would like to collect inside the txt file\
 You will copy the JavaScript from the extractor.txt file\
 Open discord on a browser (must be a browser)\
